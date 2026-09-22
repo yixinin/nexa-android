@@ -29,10 +29,27 @@ import java.net.InetAddress
 
 import kotlinx.serialization.Serializable
 
+/**
+ * The 2FA credentials of one endpoint.
+ *
+ * They belong to the endpoint, not to the app: every server keeps its own
+ * `[auth].clients` table, so a second server either needs its own pair or has
+ * to be handed the first one's secret. [secret] is only ever persisted in the
+ * prefs file that backup excludes — see `SettingsManager`.
+ */
+@Serializable
+data class NodeTwoFactor(
+    val enabled: Boolean = true,
+    val clientId: String = "",
+    val secret: String = "",
+    val algorithm: String = "sha1" // "sha1", "sha256", "sha512"
+)
+
 @Serializable
 data class NodeConfig(
     val nodeId: String,
-    val domains: List<String> = emptyList()
+    val domains: List<String> = emptyList(),
+    val twoFactor: NodeTwoFactor? = null
 )
 
 class VpnViewModel : ViewModel() {
@@ -53,12 +70,14 @@ class VpnViewModel : ViewModel() {
     val vpnPermissionGranted = kotlinx.coroutines.flow.MutableStateFlow(false)
     val notificationPermissionGranted = kotlinx.coroutines.flow.MutableStateFlow(false)
 
-    // Relay configuration
+    // Relay configuration. There is deliberately no "force relay" switch: iroh 1.0.1 exposes
+    // no stable way to stop it promoting a connection to a direct path, so a switch that
+    // claimed to would be a lie.
     val relayMode = kotlinx.coroutines.flow.MutableStateFlow("pinned") // "pinned", "default", "disabled", "custom"
     val relayUrl = kotlinx.coroutines.flow.MutableStateFlow("")
-    val forceRelay = kotlinx.coroutines.flow.MutableStateFlow(false)
+    // Bearer token for a custom relay that asks for one. Never logged.
+    val relayAuthToken = kotlinx.coroutines.flow.MutableStateFlow("")
 
-    // 2FA configuration
     /**
      * Runtime link type per backend (endpoint ID -> direct/relay), reported by iroh and
      * refreshed while the tunnel is up. Empty whenever nothing is connected, which is what
@@ -66,10 +85,8 @@ class VpnViewModel : ViewModel() {
      */
     val linkKinds = kotlinx.coroutines.flow.MutableStateFlow<Map<String, LinkKind>>(emptyMap())
 
-    val twoFactorEnabled = kotlinx.coroutines.flow.MutableStateFlow(false)
-    val twoFactorClientId = kotlinx.coroutines.flow.MutableStateFlow("")
-    val twoFactorSecret = kotlinx.coroutines.flow.MutableStateFlow("")
-    val twoFactorAlgorithm = kotlinx.coroutines.flow.MutableStateFlow("sha1") // "sha1", "sha256", "sha512"
+    // 2FA lives on the endpoint now (`NodeConfig.twoFactor`): one server, one
+    // pair of credentials. There is no app-wide setting left to publish here.
 
     // Serialize connect/disconnect so concurrent native calls cannot race.
     private val connectionMutex = Mutex()
@@ -198,11 +215,7 @@ class VpnViewModel : ViewModel() {
             nodes.value = loadedNodes
             relayMode.value = manager.loadRelayMode()
             relayUrl.value = manager.loadRelayUrl()
-            forceRelay.value = manager.loadForceRelay()
-            twoFactorEnabled.value = manager.loadTwoFactorEnabled()
-            twoFactorClientId.value = manager.loadTwoFactorClientId()
-            twoFactorSecret.value = manager.loadTwoFactorSecret()
-            twoFactorAlgorithm.value = manager.loadTwoFactorAlgorithm()
+            relayAuthToken.value = manager.loadRelayAuthToken()
             addLog("Settings loaded: ${loadedNodes.size} nodes, relay=${relayMode.value}")
         }
     }
@@ -210,33 +223,42 @@ class VpnViewModel : ViewModel() {
     private fun saveSettings() {
         settingsManager?.let { manager ->
             manager.saveNodes(nodes.value)
-            manager.saveRelayConfig(relayMode.value, relayUrl.value, forceRelay.value)
-            manager.saveTwoFactorConfig(
-                twoFactorEnabled.value,
-                twoFactorClientId.value,
-                twoFactorSecret.value,
-                twoFactorAlgorithm.value
-            )
+            manager.saveRelayConfig(relayMode.value, relayUrl.value, relayAuthToken.value)
         }
     }
 
-    fun updateRelayConfig(mode: String, url: String, force: Boolean) {
+    fun updateRelayConfig(mode: String, url: String, authToken: String = relayAuthToken.value) {
         relayMode.value = mode
-        relayUrl.value = url
-        forceRelay.value = force
+        // A URL only means anything in "custom"; keeping one around after a switch to
+        // another mode would leave a stale field behind.
+        relayUrl.value = if (mode == "custom") url else ""
+        relayAuthToken.value = if (mode == "custom") authToken else ""
         saveSettings()
-        addLog("Relay config updated: mode=${mode}, force=${force}")
+        addLog("Relay config updated: mode=${mode}, url=${relayUrl.value}")
     }
 
-    fun updateTwoFactorConfig(enabled: Boolean, clientId: String, secret: String, algorithm: String) {
-        twoFactorEnabled.value = enabled
-        twoFactorClientId.value = clientId
-        twoFactorSecret.value = secret
-        twoFactorAlgorithm.value = algorithm
+    /**
+     * Replaces the 2FA credentials of one endpoint.
+     *
+     * A null [twoFactor] means this endpoint has none, which also drops the
+     * saved secret rather than leaving it behind for whatever endpoint next
+     * reuses the ID.
+     *
+     * No client id in the log: debug builds expose Log.d, and the ID is half
+     * of the 2FA credential pair.
+     */
+    fun updateNodeTwoFactor(nodeId: String, twoFactor: NodeTwoFactor?) {
+        val index = nodes.value.indexOfFirst { it.nodeId == nodeId }
+        if (index == -1) return
+        val updated = nodes.value.toMutableList().apply {
+            set(index, this[index].copy(twoFactor = twoFactor))
+        }
+        nodes.value = updated
         saveSettings()
-        // No client id in the log: debug builds expose Log.d, and the ID is
-        // half of the 2FA credential pair.
-        addLog("2FA config updated: enabled=${enabled}, algorithm=${algorithm}")
+        addLog(
+            "2FA updated for ${nodeId.take(8)}: enabled=${twoFactor?.enabled ?: false}, " +
+                "algorithm=${twoFactor?.algorithm ?: "-"}"
+        )
     }
 
     fun addLog(message: String) {
@@ -631,14 +653,26 @@ class VpnViewModel : ViewModel() {
                                 IrohProxy.nativeSetDnsOverride(dnsOverrides)
                             }
                             // Configure the relay mode
-                            IrohProxy.nativeSetRelayConfig(relayMode.value, relayUrl.value)
+                            IrohProxy.nativeSetRelayConfig(
+                                relayMode.value,
+                                relayUrl.value,
+                                relayAuthToken.value
+                            )
                             // Configure the 2FA credentials (must be injected
-                            // before nativeStartProxy)
-                            if (twoFactorEnabled.value) {
-                                IrohProxy.nativeSetTwoFactor(
-                                    twoFactorClientId.value,
-                                    twoFactorSecret.value,
-                                    twoFactorAlgorithm.value
+                            // before nativeStartProxy). Every endpoint carries
+                            // its own pair, so the native table is cleared
+                            // first: without that, an endpoint whose 2FA was
+                            // switched off would still hold the credentials of
+                            // an earlier connect for as long as the process
+                            // lives.
+                            IrohProxy.nativeClearNodeTwoFactor()
+                            for (node in nodes.value) {
+                                val otp = node.twoFactor?.takeIf { it.enabled } ?: continue
+                                IrohProxy.nativeSetTwoFactorForNode(
+                                    node.nodeId,
+                                    otp.clientId,
+                                    otp.secret,
+                                    otp.algorithm
                                 )
                             }
                             ensureIrohStarted()

@@ -20,9 +20,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.nexa.pipe.otp.OtpAuth
+import com.nexa.pipe.otp.OtpAuthConfig
+import com.nexa.pipe.otp.OtpAuthParseResult
 import kotlinx.coroutines.launch
 
 /**
@@ -54,6 +58,12 @@ fun EndpointDetailScreen(
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showAddDomainDialog by remember { mutableStateOf(false) }
     var menuExpanded by remember { mutableStateOf(false) }
+    var showTwoFactorScanner by remember { mutableStateOf(false) }
+    var showTwoFactorExport by remember { mutableStateOf(false) }
+    // Set when a scan succeeded while this endpoint already had credentials, so
+    // the user explicitly agrees to replace them.
+    var pendingTwoFactorImport by remember { mutableStateOf<OtpAuthConfig?>(null) }
+    var twoFactorImportWarning by remember { mutableStateOf<String?>(null) }
 
     // The node can disappear while this page is open (deleted from here,
     // which also calls onBack); guard so a stale nodeId never renders an
@@ -66,6 +76,35 @@ fun EndpointDetailScreen(
     fun copyToClipboard(text: String, label: String) {
         clipboardManager.setText(AnnotatedString(text))
         Toast.makeText(context, "Copied $label", Toast.LENGTH_SHORT).show()
+    }
+
+    // This endpoint's 2FA; a switched-off one when it has never been set here.
+    val twoFactor = node.twoFactor ?: NodeTwoFactor(enabled = false)
+
+    fun updateTwoFactor(transform: (NodeTwoFactor) -> NodeTwoFactor) {
+        viewModel.updateNodeTwoFactor(nodeId, transform(twoFactor))
+    }
+
+    /**
+     * Stores credentials that came from a scanned QR code.
+     *
+     * Scanning is the user's intent to use 2FA, so it is switched on as well;
+     * mismatched code parameters are surfaced instead of being silently
+     * accepted. Only this endpoint is touched: every other one keeps whatever
+     * it had.
+     */
+    fun applyTwoFactorImport(config: OtpAuthConfig) {
+        updateTwoFactor { current ->
+            current.copy(
+                enabled = true,
+                clientId = config.clientId,
+                secret = config.secret,
+                algorithm = config.algorithm
+            )
+        }
+        twoFactorImportWarning = config.warnings.firstOrNull()
+        config.warnings.forEach { viewModel.addLog("2FA import: $it") }
+        Toast.makeText(context, "2FA imported for \"${config.clientId}\"", Toast.LENGTH_SHORT).show()
     }
 
     fun removeDomain(domain: String) {
@@ -259,6 +298,168 @@ fun EndpointDetailScreen(
                 }
             }
 
+            // 2FA belongs to the endpoint: each server keeps its own
+            // [auth.clients] table, so a second server needs its own pair —
+            // sharing one secret would mean handing this server's key to it.
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Icons.Default.Lock, contentDescription = null)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Two-factor authentication",
+                                    style = MaterialTheme.typography.titleSmall
+                                )
+                                Text(
+                                    text = if (twoFactor.enabled) "On" else "Off",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = twoFactor.enabled,
+                                onCheckedChange = { enabled ->
+                                    updateTwoFactor { current -> current.copy(enabled = enabled) }
+                                }
+                            )
+                        }
+
+                        if (!twoFactor.enabled) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Connections to this endpoint are not authenticated. " +
+                                    "A server that requires 2FA will refuse the tunnel.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            Spacer(modifier = Modifier.height(12.dp))
+                            OutlinedTextField(
+                                value = twoFactor.clientId,
+                                onValueChange = { value ->
+                                    twoFactorImportWarning = null
+                                    updateTwoFactor { current -> current.copy(clientId = value) }
+                                },
+                                label = { Text("Client ID") },
+                                placeholder = { Text("client-001") },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = twoFactor.secret,
+                                onValueChange = { value ->
+                                    twoFactorImportWarning = null
+                                    updateTwoFactor { current -> current.copy(secret = value) }
+                                },
+                                label = { Text("TOTP Secret") },
+                                placeholder = { Text("JBSWY3DPEHPK3PXP") },
+                                visualTransformation = PasswordVisualTransformation(),
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text("Algorithm", style = MaterialTheme.typography.labelMedium)
+                            Spacer(modifier = Modifier.height(4.dp))
+                            listOf("sha1" to "SHA1 (default)", "sha256" to "SHA256", "sha512" to "SHA512")
+                                .forEach { (alg, label) ->
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        RadioButton(
+                                            selected = twoFactor.algorithm == alg,
+                                            onClick = {
+                                                twoFactorImportWarning = null
+                                                updateTwoFactor { current -> current.copy(algorithm = alg) }
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(label, style = MaterialTheme.typography.bodySmall)
+                                    }
+                                }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                OutlinedButton(
+                                    onClick = { showTwoFactorScanner = true },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Search,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Scan QR code",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1
+                                    )
+                                }
+                                OutlinedButton(
+                                    onClick = { showTwoFactorExport = true },
+                                    enabled = twoFactor.clientId.isNotBlank() && twoFactor.secret.isNotBlank(),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Share,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = "Share as QR",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            twoFactorImportWarning?.let { warning ->
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.Warning,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = warning,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "These credentials are this endpoint's own; " +
+                                    "every other endpoint keeps whatever it was given.",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -401,6 +602,65 @@ fun EndpointDetailScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    if (showTwoFactorScanner) {
+        QrScannerDialog(
+            onDismiss = { showTwoFactorScanner = false },
+            onResult = { scanned ->
+                when (val result = OtpAuth.parse(scanned)) {
+                    is OtpAuthParseResult.Failure -> result.message
+                    is OtpAuthParseResult.Success -> {
+                        // With nothing on this endpoint the scan is applied
+                        // straight away; otherwise replacing working
+                        // credentials needs a confirmation.
+                        if (twoFactor.clientId.isBlank() && twoFactor.secret.isBlank()) {
+                            applyTwoFactorImport(result.config)
+                        } else {
+                            pendingTwoFactorImport = result.config
+                        }
+                        null
+                    }
+                }
+            }
+        )
+    }
+
+    pendingTwoFactorImport?.let { scanned ->
+        AlertDialog(
+            onDismissRequest = { pendingTwoFactorImport = null },
+            title = { Text("Replace 2FA Configuration") },
+            text = {
+                Text(
+                    "This endpoint already has 2FA credentials.\n\n" +
+                        "Replace them with the scanned ones for \"${scanned.clientId}\"?"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        applyTwoFactorImport(scanned)
+                        pendingTwoFactorImport = null
+                    }
+                ) {
+                    Text("Replace")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingTwoFactorImport = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showTwoFactorExport) {
+        TwoFactorExportDialog(
+            clientId = twoFactor.clientId,
+            secret = twoFactor.secret,
+            algorithm = twoFactor.algorithm,
+            onDismiss = { showTwoFactorExport = false }
         )
     }
 }
