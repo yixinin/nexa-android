@@ -155,6 +155,22 @@ object IrohProxy {
      */
     external fun nativeLinkKinds(): String?
 
+    /**
+     * Closes and forgets every cached backend connection, keeping the iroh endpoint.
+     *
+     * The recovery step for a network switch (Wi-Fi <-> cellular, or a network that came
+     * back). A tunnel can be rebuilt on the new network and still be unusable: the
+     * connections inside it were opened on the old one, and QUIC does not notice — a
+     * connection whose path is dead still reports no close reason, so the pool keeps handing
+     * it out and every proxied request fails. This drops them, so the next request dials on
+     * the network that is actually up. Follow it with [nativePreconnect] to warm the pool
+     * again.
+     *
+     * Must be called after nativeStartProxy (which creates the EndpointGroup).
+     * @return 0 when the connections were dropped, -1 when nothing has been started yet.
+     */
+    external fun nativeDropConnections(): Int
+
     external fun nativeStartProxyLegacy(listenPort: Int, targetEndpointId: String): Int
 
     external fun nativeStopProxy(): Int

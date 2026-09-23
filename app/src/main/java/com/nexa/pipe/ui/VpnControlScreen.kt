@@ -17,7 +17,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -28,6 +27,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nexa.pipe.PermissionManager
 import com.nexa.pipe.ui.components.NexaDangerButton
@@ -70,9 +72,12 @@ fun VpnControlScreen(viewModel: VpnViewModel = viewModel()) {
     // the "type an endpoint ID by hand" dialog is gone.
     var showInviteLinkDialog by remember { mutableStateOf(false) }
     // The endpoint whose detail page is open; null while on the main page.
-    // Saveable so a rotation keeps the detail page instead of dropping
-    // back to the directory.
-    var selectedNodeId by rememberSaveable { mutableStateOf<String?>(null) }
+    //
+    // Deliberately not saveable. Restoring it brought the app back on the detail page of
+    // whatever endpoint was open before — and since that is a state of *this* screen rather
+    // than a destination of its own, the back button then looked like it switched to an old
+    // state of the app instead of leaving it. The directory is the entry point, every time.
+    var selectedNodeId by remember { mutableStateOf<String?>(null) }
     var showRelaySettings by remember { mutableStateOf(false) }
     var showInviteScanner by remember { mutableStateOf(false) }
     // An endpoint invite rewrites shared settings, so it is confirmed when it
@@ -85,6 +90,19 @@ fun VpnControlScreen(viewModel: VpnViewModel = viewModel()) {
     // another screen).
     LaunchedEffect(Unit) {
         viewModel.syncVpnServiceState()
+    }
+
+    // ...and again every time the screen comes back to the foreground. The session does not
+    // wait for this UI: the service rebuilds the tunnel on a network switch, and it may give up
+    // and stop it altogether. Re-reading on resume is what keeps the main page from showing the
+    // state it last knew instead of the state that is true now.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.onForeground()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // Second, deliberately redundant channel: the error card sits at the top of the page, but the

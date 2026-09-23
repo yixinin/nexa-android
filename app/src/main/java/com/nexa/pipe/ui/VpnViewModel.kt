@@ -112,12 +112,50 @@ class VpnViewModel : ViewModel() {
                 }
             }
         }
+        // The service telling us the session stopped working (a network switch it could not
+        // recover from, or a backend it cannot reach on the new network). Reported while this
+        // UI was in the background or not alive at all, so it is the only way the status card
+        // stops claiming "Connected" over a tunnel that carries nothing.
+        NexaVpnService.setBrokenListener { reason ->
+            viewModelScope.launch {
+                // The service clears `isServiceActive` when it tore the session down, and leaves
+                // it set when the tunnel survived but nothing behind it answers — so this is how
+                // "the session is over" is told apart from "the session is degraded". Only the
+                // former drops back to Disconnected; reporting the latter as a disconnect would
+                // send the user to reconnect a tunnel that is still up.
+                if (!NexaVpnService.isServiceActive) {
+                    stopLinkPolling()
+                    isVpnRunning.value = false
+                    isIrohStarted.value = false
+                    addLog("Tunnel stopped working: $reason")
+                } else {
+                    addLog("Tunnel degraded: $reason")
+                }
+                errorMessage.value = reason
+            }
+        }
     }
 
     override fun onCleared() {
         NexaVpnService.setRevokedListener(null)
+        NexaVpnService.setBrokenListener(null)
         stopLinkPolling()
         super.onCleared()
+    }
+
+    /**
+     * Re-reads what the UI shows after it comes back to the foreground.
+     *
+     * Everything a session reports can change while this screen is not visible: the service
+     * rebuilds the tunnel on a network switch, and it may give up and tear the session down.
+     * Without a re-read the main page keeps showing whatever it last knew — an "old state"
+     * that no longer matches the tunnel.
+     */
+    fun onForeground() {
+        syncVpnServiceState()
+        // A session that survived in the service also has to be reported again: this ViewModel
+        // may have been created after connect() ran, in which case nothing is polling yet.
+        if (isVpnRunning.value) startLinkPolling()
     }
 
     /**
@@ -125,9 +163,16 @@ class VpnViewModel : ViewModel() {
      *
      * Best-effort: a failed read leaves the last known values in place rather than emptying the
      * map, so a transient JNI hiccup does not make every icon disappear.
+     *
+     * Deliberately **not** gated on [isIrohStarted]. That flag lives in this ViewModel, so it is
+     * false again as soon as the UI is recreated — which is exactly what a background switch or a
+     * process restore does while the tunnel keeps running in the service. Gating on it emptied
+     * the map for the rest of the session: the status card said "Connected" while the connection
+     * type was never shown again. Whether anything is started is the native side's answer to
+     * give, and it says so by returning null.
      */
     fun refreshLinkKinds() {
-        if (!isIrohStarted.value || !IrohProxy.isNativeLoaded()) {
+        if (!IrohProxy.isNativeLoaded()) {
             if (linkKinds.value.isNotEmpty()) linkKinds.value = emptyMap()
             return
         }
@@ -160,8 +205,14 @@ class VpnViewModel : ViewModel() {
         return parsed
     }
 
-    /** Starts re-reading the link types; no-op when a poll is already running. */
-    private fun startLinkPolling() {
+    /**
+     * Starts re-reading the link types; no-op when a poll is already running.
+     *
+     * Public because `connect()` is not the only way a session comes to exist: the service
+     * outlives a UI that was recreated in the background, and the ViewModel that wakes up with
+     * it has to pick the reporting back up. See [onForeground].
+     */
+    fun startLinkPolling() {
         if (linkPollJob?.isActive == true) return
         linkPollJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
@@ -913,7 +964,16 @@ class VpnViewModel : ViewModel() {
     fun syncVpnServiceState() {
         if (!isVpnRunning.value && !isConnecting.value && NexaVpnService.isServiceActive) {
             isVpnRunning.value = true
+            // The native endpoint is up too — the service only becomes active after
+            // nativeStartIroh and nativeStartProxy succeeded. Recording it matters when this
+            // ViewModel was created *after* the connect that started the session (a background
+            // switch that recreated the activity): `removeNode`/`renameNode` re-point the
+            // native side only when it is set.
+            isIrohStarted.value = true
             addLog("Synced UI state: service is active")
+            // ...and the connection types have to be reported again, since the poll that used
+            // to run belongs to the ViewModel that is gone.
+            startLinkPolling()
         }
         // The VPN slot was lost to another VPN app while this ViewModel had no
         // revoked-listener registered (app was backgrounded or the ViewModel
