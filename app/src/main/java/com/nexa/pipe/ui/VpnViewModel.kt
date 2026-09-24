@@ -10,7 +10,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nexa.pipe.IrohProxy
 import com.nexa.pipe.PermissionManager
+import com.nexa.pipe.R
 import com.nexa.pipe.SettingsManager
+import com.nexa.pipe.locale.AppStrings
 import com.nexa.pipe.vpn.NexaVpnService
 import com.nexa.pipe.vpn.UnderlyingNetworkSelector
 import kotlinx.coroutines.Dispatchers
@@ -107,7 +109,7 @@ class VpnViewModel : ViewModel() {
             viewModelScope.launch {
                 if (isVpnRunning.value) {
                     isVpnRunning.value = false
-                    errorMessage.value = VPN_TAKEN_OVER_MESSAGE
+                    errorMessage.value = AppStrings.get(R.string.error_vpn_taken_over)
                     addLog("Tunnel revoked: another app (e.g. Clash) took over the tunnel slot")
                 }
             }
@@ -240,11 +242,8 @@ class VpnViewModel : ViewModel() {
         // startProxyWithRetries increments it automatically on a port conflict.
         private const val LOCAL_PROXY_PORT = 8080
 
-        // Shown when another proxy app (e.g. Clash) owns the single tunnel slot
-        // Android allows per user.
-        private const val VPN_TAKEN_OVER_MESSAGE =
-            "Another app (e.g. Clash) took over the tunnel. " +
-                "Android allows only one active tunnel at a time — disconnect the other app to use Nexa."
+        // `error_vpn_taken_over` is what is shown when another proxy app (e.g.
+        // Clash) owns the single tunnel slot Android allows per user.
 
         // Upper bound on the in-memory log buffer.
         private const val MAX_LOG_LINES = 100
@@ -337,7 +336,7 @@ class VpnViewModel : ViewModel() {
                 ensureIrohStarted()
             } catch (e: Exception) {
                 addLog("Error starting iroh: ${e.message}")
-                errorMessage.value = e.message ?: "Unknown error"
+                errorMessage.value = e.message ?: AppStrings.get(R.string.error_unknown)
             }
         }
     }
@@ -355,7 +354,7 @@ class VpnViewModel : ViewModel() {
             isIrohStarted.value = true
             addLog("Iroh started: $id")
         } else {
-            throw Exception("Failed to start iroh")
+            throw Exception(AppStrings.get(R.string.error_start_iroh))
         }
     }
 
@@ -471,7 +470,7 @@ class VpnViewModel : ViewModel() {
             }
         }
         if (!hasDomainMappings) {
-            throw Exception("No domain mappings configured. Please add nodes with domains.")
+            throw Exception(AppStrings.get(R.string.error_no_domain_mappings))
         }
         return nodes.value.flatMap { it.domains }
     }
@@ -497,7 +496,7 @@ class VpnViewModel : ViewModel() {
             if (result == 0) break
             if (result == IrohProxy.RESULT_CONFIG_ERROR) {
                 throw Exception(
-                    nativeFailureReason() ?: "Invalid proxy configuration"
+                    nativeFailureReason() ?: AppStrings.get(R.string.error_invalid_proxy_config)
                 )
             }
             addLog("Failed to start proxy on port $actualPort, retrying...")
@@ -506,7 +505,7 @@ class VpnViewModel : ViewModel() {
         if (result != 0) {
             val reason = nativeFailureReason()
             throw Exception(
-                "Failed to start proxy on ports $basePort..${basePort + 9}" +
+                AppStrings.get(R.string.error_proxy_ports, basePort, basePort + 9) +
                     if (reason != null) ": $reason" else ""
             )
         }
@@ -525,20 +524,22 @@ class VpnViewModel : ViewModel() {
     private fun preconnectFailureReason(result: Int): String {
         val targets = nodes.value
             .map { it.nodeId }
-            .ifEmpty { listOf("the configured backends") }
+            .ifEmpty { listOf(AppStrings.get(R.string.error_configured_backends)) }
             .joinToString(", ")
         val base = if (result == 0) {
-            "No backend is reachable ($targets). " +
-                "Check that the endpoint IDs are correct and that the servers are online."
+            AppStrings.get(R.string.error_no_backend_reachable, targets)
         } else {
-            "Backend reachability check failed (nativePreconnect returned $result). " +
-                "See the log for details."
+            AppStrings.get(R.string.error_preconnect_failed, result)
         }
         // A server that answered and then refused the connection (2FA, most
         // often) leaves its reason on the native side. Without it a refusal
         // looks exactly like an offline server.
         val detail = nativeFailureReason()
-        return if (detail != null) "$base Cause: $detail." else base
+        return if (detail != null) {
+            "$base ${AppStrings.get(R.string.error_cause, detail)}"
+        } else {
+            base
+        }
     }
 
     /** Reason behind the last failed native call, or null when there is none. */
@@ -564,8 +565,7 @@ class VpnViewModel : ViewModel() {
             addLog("Node ID validation unavailable: ${e.message}")
             return null
         } ?: return null
-        return "Invalid endpoint ID '$id': $reason. " +
-            "Endpoint IDs are 64 hexadecimal characters."
+        return AppStrings.get(R.string.error_invalid_endpoint_id, id, reason)
     }
 
     /**
@@ -644,11 +644,11 @@ class VpnViewModel : ViewModel() {
                 }
 
                 if (!IrohProxy.isNativeLoaded()) {
-                    throw Exception("Native library not loaded. Please check if libnexapipe_client.so is properly included in the APK.")
+                    throw Exception(AppStrings.get(R.string.error_native_library))
                 }
                 val vpnPermissionGranted = VpnService.prepare(context) == null
                 if (!vpnPermissionGranted) {
-                    throw Exception("Proxy permission not granted. Grant it from the permission guide first.")
+                    throw Exception(AppStrings.get(R.string.error_vpn_permission))
                 }
 
                 // Mutual-exclusion guard: Android allows only one active
@@ -661,7 +661,7 @@ class VpnViewModel : ViewModel() {
                 if (!NexaVpnService.isServiceActive &&
                     UnderlyingNetworkSelector.hasActiveVpnNetwork(cm)
                 ) {
-                    errorMessage.value = VPN_TAKEN_OVER_MESSAGE
+                    errorMessage.value = AppStrings.get(R.string.error_vpn_taken_over)
                     addLog("connect aborted: another proxy app is active")
                     return@launch
                 }
@@ -785,7 +785,8 @@ class VpnViewModel : ViewModel() {
                         delay(BACKOFF_MS[attempt])
                     }
                 }
-                errorMessage.value = lastError?.message ?: "All connection attempts failed"
+                errorMessage.value = lastError?.message
+                    ?: AppStrings.get(R.string.error_all_attempts_failed)
                 addLog("All $MAX_CONNECT_ATTEMPTS attempts failed")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // Deliberate cancellation from disconnect: propagate quietly;
@@ -796,7 +797,7 @@ class VpnViewModel : ViewModel() {
                 // permission not granted, ...). Without this catch the
                 // exception escapes the coroutine and crashes the app.
                 addLog("Connect failed: ${e.message}")
-                errorMessage.value = e.message ?: "Connection failed"
+                errorMessage.value = e.message ?: AppStrings.get(R.string.error_connection_failed)
             } finally {
                 isConnecting.value = false
                 connectionStatusText.value = null
@@ -858,8 +859,10 @@ class VpnViewModel : ViewModel() {
      */
     fun addNode(nodeId: String): String? {
         val id = nodeId.trim()
-        if (id.isEmpty()) return "Endpoint ID cannot be empty"
-        if (nodes.value.any { it.nodeId == id }) return "Endpoint ID already exists: $id"
+        if (id.isEmpty()) return AppStrings.get(R.string.error_endpoint_id_empty)
+        if (nodes.value.any { it.nodeId == id }) {
+            return AppStrings.get(R.string.error_endpoint_id_exists, id)
+        }
         nodeIdFormatError(id)?.let { return it }
 
         nodes.value = nodes.value + NodeConfig(id)
@@ -894,12 +897,14 @@ class VpnViewModel : ViewModel() {
      */
     fun renameNode(oldNodeId: String, newNodeId: String): String? {
         val newId = newNodeId.trim()
-        if (newId.isEmpty()) return "Endpoint ID cannot be empty"
+        if (newId.isEmpty()) return AppStrings.get(R.string.error_endpoint_id_empty)
         if (newId == oldNodeId) return null
 
         val index = nodes.value.indexOfFirst { it.nodeId == oldNodeId }
-        if (index == -1) return "Endpoint not found: $oldNodeId"
-        if (nodes.value.any { it.nodeId == newId }) return "Endpoint ID already exists: $newId"
+        if (index == -1) return AppStrings.get(R.string.error_endpoint_not_found, oldNodeId)
+        if (nodes.value.any { it.nodeId == newId }) {
+            return AppStrings.get(R.string.error_endpoint_id_exists, newId)
+        }
         nodeIdFormatError(newId)?.let { return it }
 
         val node = nodes.value[index]
@@ -981,7 +986,7 @@ class VpnViewModel : ViewModel() {
         // "Connected".
         if (isVpnRunning.value && !isConnecting.value && NexaVpnService.wasRevoked) {
             isVpnRunning.value = false
-            errorMessage.value = VPN_TAKEN_OVER_MESSAGE
+            errorMessage.value = AppStrings.get(R.string.error_vpn_taken_over)
             addLog("Synced UI state: tunnel was revoked by another app")
         }
     }

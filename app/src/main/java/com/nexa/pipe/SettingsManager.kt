@@ -10,7 +10,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.decodeFromString
 
 class SettingsManager(context: Context) {
-    private val prefs: SharedPreferences = context.getSharedPreferences("NexaPipeSettings", Context.MODE_PRIVATE)
+    private val prefs: SharedPreferences = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     // 2FA secrets live in their own prefs file so backup rules can exclude
     // them as a whole; a TOTP seed must never leave the device. The endpoint
     // list itself *is* backed up, so every secret is pulled out of it on save
@@ -22,8 +22,9 @@ class SettingsManager(context: Context) {
         migrateLegacyTwoFactor()
     }
 
-    private companion object {
-        const val TAG = "SettingsManager"
+    companion object {
+        private const val TAG = "SettingsManager"
+        const val PREFS_NAME = "NexaPipeSettings"
         const val KEY_NODES = "nodes"
         const val KEY_RELAY_MODE = "relay_mode"
         const val KEY_RELAY_URL = "relay_url"
@@ -37,6 +38,29 @@ class SettingsManager(context: Context) {
         const val KEY_2FA_SECRET = "two_factor_secret"
         const val KEY_2FA_ALGORITHM = "two_factor_algorithm"
         const val KEY_2FA_MIGRATED = "two_factor_migrated"
+
+        // Language tag of the app UI, e.g. "zh-CN". Empty means "follow the
+        // system", which is the default.
+        private const val KEY_LANGUAGE = "app_language"
+
+        /**
+         * The saved language tag, or "" for "follow the system".
+         *
+         * A static read on purpose: `attachBaseContext` needs it before a
+         * [SettingsManager] — and its 2FA migration — would be worth building.
+         */
+        @JvmStatic
+        fun loadLanguage(context: Context): String =
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getString(KEY_LANGUAGE, "") ?: ""
+
+        @JvmStatic
+        fun saveLanguage(context: Context, languageTag: String) {
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LANGUAGE, languageTag)
+                .apply()
+        }
     }
 
     /**

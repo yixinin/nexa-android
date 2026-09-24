@@ -17,6 +17,7 @@ import android.util.Log
 import com.nexa.pipe.IrohProxy
 import com.nexa.pipe.MainActivity
 import com.nexa.pipe.R
+import com.nexa.pipe.locale.AppLocale
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -43,6 +44,13 @@ import kotlinx.coroutines.withTimeoutOrNull
  * are all done on the Rust side.
  */
 class NexaVpnService : VpnService() {
+    // The notification this service shows is written from its own context, so
+    // it needs the selected language as much as the Activity does; switching
+    // language and reconnecting is enough to rebuild it.
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(AppLocale.apply(newBase))
+    }
+
     private val TAG = "NexaVpnService"
     private var vpnInterface: ParcelFileDescriptor? = null
     // @Volatile: written from the main thread (onStartCommand/onRevoke) and
@@ -522,7 +530,7 @@ class NexaVpnService : VpnService() {
         // isServiceActive, which stopVPN() has just cleared.
         stopVPN()
         stopSelf()
-        notifyBroken(TUNNEL_REBUILD_FAILED_MESSAGE)
+        notifyBroken(getString(R.string.notify_tunnel_rebuild_failed))
     }
 
     /**
@@ -566,7 +574,7 @@ class NexaVpnService : VpnService() {
         val warmed = IrohProxy.nativePreconnect()
         if (warmed <= 0) {
             Log.w(TAG, "Reconnect: no backend answered the warm-up (nativePreconnect=$warmed)")
-            notifyBroken(BACKEND_UNREACHABLE_MESSAGE)
+            notifyBroken(getString(R.string.notify_backend_unreachable))
         } else {
             Log.d(TAG, "Reconnect: $warmed backend(s) reachable on the new network")
         }
@@ -578,8 +586,12 @@ class NexaVpnService : VpnService() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Nexa", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Nexa Service"
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                getString(R.string.notification_channel_name),
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = getString(R.string.notification_channel_description)
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             }
@@ -605,8 +617,8 @@ class NexaVpnService : VpnService() {
         }
 
         return builder
-            .setContentTitle("Nexa")
-            .setContentText("Connected")
+            .setContentTitle(getString(R.string.notification_title))
+            .setContentText(getString(R.string.notification_text))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -628,21 +640,6 @@ class NexaVpnService : VpnService() {
         // blocked in a native call cannot be interrupted, so the wait is what keeps two of them
         // from ever touching the TUN at the same time.
         private const val RECONNECT_HANDOVER_TIMEOUT_MS = 120_000L
-
-        /**
-         * Shown when a network switch was survived by the tunnel but not by the
-         * connection to the backend: nothing to proxy traffic to.
-         */
-        const val BACKEND_UNREACHABLE_MESSAGE =
-            "The network changed and no backend answered on the new one. " +
-                "Reconnect if the tunnel stays unusable."
-
-        /**
-         * Shown when the tunnel itself could not be rebuilt after a network
-         * switch: the session is over, not merely degraded.
-         */
-        const val TUNNEL_REBUILD_FAILED_MESSAGE =
-            "The tunnel could not be rebuilt after the network changed. Please reconnect."
 
         /**
          * Process-level flag: whether the VPN service is active (the TUN proxy
