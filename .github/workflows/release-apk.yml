@@ -69,7 +69,7 @@ jobs:
 
     steps:
       - name: Checkout Android repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Resolve build inputs
         id: opts
@@ -206,7 +206,7 @@ jobs:
 
       - name: Checkout upstream Rust repo
         if: steps.opts.outputs.skip_rust != 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.RUST_REPO }}
           ref: ${{ steps.opts.outputs.rust_ref }}
