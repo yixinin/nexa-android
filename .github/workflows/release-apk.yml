@@ -440,7 +440,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: github.ref_type == 'tag' && steps.opts.outputs.skip_rust != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             nexapipe-${{ steps.opts.outputs.version_name }}-arm64-v8a.apk
