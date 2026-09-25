@@ -430,7 +430,7 @@ jobs:
 
       - name: Upload APK artifact
         if: steps.opts.outputs.skip_rust != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nexapipe-release-apk-${{ steps.opts.outputs.version_name }}
           path: |
